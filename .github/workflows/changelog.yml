@@ -1,0 +1,139 @@
+name: Amity Commit Notification
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Amity changelog
+        env:
+          EVENT_PATH: ${{ github.event_path }}
+          GITHUB_ACTOR_NAME: ${{ github.actor }}
+          AMITY_LOGO_URL: ${{ vars.AMITY_LOGO_URL }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from datetime import datetime, timezone
+
+          with open(os.environ['EVENT_PATH'], encoding='utf-8') as file:
+              event = json.load(file)
+
+          categories = {
+              '✨ Additions': [],
+              '🛠️ Changed': [],
+              '🐛 Fixes': [],
+              '🗑️ Removed': [],
+          }
+          ignored = {'ci', 'build', 'docs', 'test', 'refactor', 'style'}
+
+          for commit in event.get('commits') or []:
+              author = commit.get('author') or {}
+              author_name = (author.get('name') or '').lower()
+              username = (author.get('username') or '').lower()
+              if username.endswith('[bot]') or 'github-actions' in author_name or 'github actions' in author_name:
+                  continue
+
+              first_line = (commit.get('message') or '').splitlines()
+              if not first_line:
+                  continue
+              message = first_line[0].strip()
+              match = re.match(r'^([a-z]+)(?:\([^)]+\))?!?:\s*(.+)$', message, re.I)
+              kind = match.group(1).lower() if match else ''
+              if match:
+                  message = match.group(2).strip()
+              if not message or kind in ignored:
+                  continue
+
+              if kind in {'feat', 'feature', 'add'}:
+                  group = '✨ Additions'
+              elif kind in {'fix', 'hotfix'}:
+                  group = '🐛 Fixes'
+              elif kind in {'remove', 'delete'}:
+                  group = '🗑️ Removed'
+              else:
+                  group = '🛠️ Changed'
+
+              message = message[:220]
+              message = message[0].upper() + message[1:]
+              message = re.sub(r'([\\`*_~|>])', r'\\\1', message)
+              categories[group].append('• ' + message)
+
+          description = ''
+          included = 0
+          omitted = 0
+          for label, entries in categories.items():
+              header_added = False
+              for entry in entries:
+                  addition = (
+                      ('\n\n' if description else '') + f'**{label}**\n' + entry
+                      if not header_added else '\n' + entry
+                  )
+                  if len(description) + len(addition) > 3800:
+                      omitted += 1
+                      continue
+                  description += addition
+                  header_added = True
+                  included += 1
+
+          if not description:
+              print('No changes to announce.')
+              raise SystemExit(0)
+          if omitted:
+              description += f'\n\n*{omitted} additional changes not shown.*'
+
+          actor = os.environ['GITHUB_ACTOR_NAME']
+          embed = {
+              'title': 'Server Updates',
+              'description': description,
+              'color': 0x5678F6,
+              'author': {
+                  'name': actor,
+                  'url': f'https://github.com/{actor}',
+                  'icon_url': f'https://github.com/{actor}.png?size=80',
+              },
+              'footer': {'text': f'Amity Roleplay • {included} changes'},
+              'timestamp': datetime.now(timezone.utc).isoformat(),
+          }
+          if event.get('compare'):
+              embed['url'] = event['compare']
+
+          logo_url = os.environ.get('AMITY_LOGO_URL', '').strip()
+          if logo_url.startswith(('https://', 'http://')):
+              embed['thumbnail'] = {'url': logo_url}
+
+          with open('payload.json', 'w', encoding='utf-8') as file:
+              json.dump({'allowed_mentions': {'parse': []}, 'embeds': [embed]}, file, ensure_ascii=False)
+          print(f'Prepared {included} changelog entries.')
+          PY
+
+      - name: Publish using Amity Discord bot
+        env:
+          BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+        run: |
+          if [ ! -f payload.json ]; then
+            echo "No changelog to publish."
+            exit 0
+          fi
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHANNEL_ID" ]; then
+            echo "::error::Missing DISCORD_BOT_TOKEN or DISCORD_CHANNEL_ID"
+            exit 1
+          fi
+
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            -H "Authorization: Bot ${BOT_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "User-Agent: DiscordBot (https://github.com, 1.0)" \
+            --data-binary @payload.json \
+            "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" \
+            > /dev/null
+          echo "Amity changelog published."
