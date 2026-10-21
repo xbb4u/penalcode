@@ -13,7 +13,6 @@ jobs:
     steps:
       - name: Build Amity changelog
         env:
-          EVENT_PATH: ${{ github.event_path }}
           GITHUB_ACTOR_NAME: ${{ github.actor }}
           AMITY_LOGO_URL: ${{ vars.AMITY_LOGO_URL }}
         run: |
@@ -23,7 +22,7 @@ jobs:
           import re
           from datetime import datetime, timezone
 
-          with open(os.environ['EVENT_PATH'], encoding='utf-8') as file:
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as file:
               event = json.load(file)
 
           categories = {
